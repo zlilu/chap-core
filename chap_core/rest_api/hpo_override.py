@@ -38,10 +38,12 @@ class HpoOverride:
         hpo_data = merged_data.copy()
         # use template name, not configured model/merged_data name, hpo model name should not depend on whichever configured model with the same template happend to be selected first
         hpo_data["name"] = f"{template_data['name']}{self.HPO_SUFFIX}"
+        # this is prob a temporary hack
+        hpo_data["id"] = hpo_data["id"] + 1000 if hpo_data["id"] is not None else None 
 
         if (
             model_template_db.display_name != "No Display Name Yet"
-        ):  # change to check whether it matches default rather than hardcoded str
+        ):  # TODO: change to check whether it matches default rather than hardcoded str
             hpo_data["display_name"] = f"{model_template_db.display_name} {self._HPO_DISPLAY_SUFFIX}"
 
         return hpo_data

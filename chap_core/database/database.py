@@ -244,17 +244,6 @@ class SessionWrapper:
             if hpo_data is not None:
                 configured_models_data.append(hpo_data)
 
-            # old hpo logic
-            # if configured_model.model_template.hpo_search_space is not None and configured_model.model_template.id not in model_template_ids:
-            #     hpo_data = merged_data.copy()
-            #     # hpo_data["name"] = f'{merged_data["name"]}:hpo'
-            #     # hpo model name should not depend on whichever configured model with the same template happend to be selected first in the query
-            #     hpo_data["name"] = f'{template_data["name"]}:hpo'
-            #     # if 'No display name yet' drop [Hpo]
-            #     hpo_data["display_name"] = f'{template_display_name} [Hpo]'
-            #     configured_models_data.append(hpo_data)
-            #     model_template_ids.add(configured_model.model_template.id)
-
         # debug
         # import json
         # for m in configured_models_data:
