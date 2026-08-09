@@ -1,7 +1,6 @@
 import itertools
 from pathlib import Path
 
-import altair
 import pandas as pd
 import pytest
 
@@ -13,22 +12,15 @@ from chap_core.assessment.backtest_plots import (
     create_plot_from_evaluation,
     BacktestPlotBase,
 )
-from chap_core.assessment.backtest_plots.evaluation_plot import EvaluationPlot, _infer_split_periods
+from chap_core.assessment.backtest_plots.evaluation_plot import EvaluationPlot, _infer_split_periods_vectorized
 from chap_core.assessment.backtest_plots.horizon_location_grid import HorizonLocationGridPlot
 from chap_core.plotting.backtest_plot import clean_time
-from chap_core.assessment.backtest_plots.metrics_dashboard import MetricsDashboard
 from chap_core.assessment.backtest_plots.predicted_vs_actual_linear_plot import PredictedVsActualLinearPlot
 from chap_core.assessment.backtest_plots.predicted_vs_actual_plot import PredictedVsActualPlot
-from chap_core.assessment.backtest_plots.sample_bias_plot import SampleBiasPlot
+from chap_core.assessment.backtest_plots.sample_bias_plot import SampleBiasByHorizonPlot, SampleBiasByTimePeriodPlot
 from chap_core.assessment.evaluation import Evaluation
 from chap_core.cli_endpoints.utils import plot_backtest
 from chap_core.database.tables import Backtest
-
-
-@pytest.fixture(scope="module")
-def default_transformer():
-    altair.data_transformers.enable("default")
-    yield
 
 
 def test_backtest_plot_registry():
@@ -36,9 +28,12 @@ def test_backtest_plot_registry():
     registry = get_backtest_plots_registry()
 
     # Check that expected plots are registered
-    assert "metrics_dashboard" in registry
-    assert "ratio_of_samples_above_truth" in registry
+    assert "horizon_location_grid" in registry
+    assert "sample_bias_by_horizon" in registry
+    assert "sample_bias_by_time_period" in registry
     assert "evaluation_plot" in registry
+    # The combined dashboard was split into the two plots above
+    assert "ratio_of_samples_above_truth" not in registry
 
     # Check that all registered plots are subclasses of BacktestPlotBase
     for plot_id, plot_cls in registry.items():
@@ -47,11 +42,14 @@ def test_backtest_plot_registry():
 
 def test_get_backtest_plot():
     """Test getting a specific plot by ID."""
-    plot_cls = get_backtest_plot("metrics_dashboard")
-    assert plot_cls is MetricsDashboard
+    plot_cls = get_backtest_plot("horizon_location_grid")
+    assert plot_cls is HorizonLocationGridPlot
 
-    plot_cls = get_backtest_plot("ratio_of_samples_above_truth")
-    assert plot_cls is SampleBiasPlot
+    plot_cls = get_backtest_plot("sample_bias_by_horizon")
+    assert plot_cls is SampleBiasByHorizonPlot
+
+    plot_cls = get_backtest_plot("sample_bias_by_time_period")
+    assert plot_cls is SampleBiasByTimePeriodPlot
 
     plot_cls = get_backtest_plot("evaluation_plot")
     assert plot_cls is EvaluationPlot
@@ -80,24 +78,21 @@ def test_evaluation_plot_directly(flat_observations, flat_forecasts, default_tra
     assert chart is not None
 
 
-def test_sample_bias_plot_directly(flat_observations, flat_forecasts, default_transformer):
-    """Test the sample bias plot with flat data."""
-    plot = SampleBiasPlot()
+@pytest.mark.parametrize("plot_cls", [SampleBiasByHorizonPlot, SampleBiasByTimePeriodPlot])
+def test_sample_bias_plots_directly(plot_cls, flat_observations, flat_forecasts, default_transformer):
+    """Test the sample bias plots produce single-view charts with flat data."""
+    plot = plot_cls()
     chart = plot.plot(pd.DataFrame(flat_observations), pd.DataFrame(flat_forecasts))
     assert chart is not None
-
-
-def test_metrics_dashboard_directly(flat_observations, flat_forecasts, default_transformer):
-    """Test the metrics dashboard with flat data."""
-    plot = MetricsDashboard()
-    chart = plot.plot(pd.DataFrame(flat_observations), pd.DataFrame(flat_forecasts))
-    assert chart is not None
+    spec = chart.to_dict()
+    assert "vconcat" not in spec and "hconcat" not in spec
+    assert spec["height"] == 300
 
 
 def test_horizon_location_grid_directly(flat_observations, flat_forecasts_multiple_samples, default_transformer):
     """Test the horizon location grid plot with multiple-sample forecasts."""
     plot = HorizonLocationGridPlot()
-    chart = plot.plot(pd.DataFrame(flat_observations), pd.DataFrame(flat_forecasts_multiple_samples))
+    chart = plot.get_full_plot(pd.DataFrame(flat_observations), pd.DataFrame(flat_forecasts_multiple_samples))
     assert chart is not None
 
 
@@ -118,7 +113,7 @@ def test_predicted_vs_actual_linear_plot_directly(
 
 
 def test_infer_split_periods_monthly_format():
-    """Test that _infer_split_periods produces date strings, not repr strings like 'Month(2022-1)'."""
+    """Regression: split_period must be a date string, not a repr like 'Month(2022-1)'."""
     df = pd.DataFrame(
         {
             "location": ["loc1", "loc1"],
@@ -127,7 +122,7 @@ def test_infer_split_periods_monthly_format():
             "q_50": [10.0, 12.0],
         }
     )
-    result = _infer_split_periods(df)
+    result = _infer_split_periods_vectorized(df)
     for split_period in result["split_period"]:
         assert "Month(" not in split_period, f"Got repr string: {split_period}"
         assert split_period.startswith("20"), f"Unexpected format: {split_period}"
@@ -199,7 +194,7 @@ def test_plot_backtest_cli(backtest: Backtest, tmp_path: Path, default_transform
     evaluation.to_file(input_file)
 
     output_file = tmp_path / "plot.html"
-    plot_backtest(input_file, output_file, plot_type="metrics_dashboard")
+    plot_backtest(input_file, output_file, plot_type="horizon_location_grid")
 
     assert output_file.exists()
     assert output_file.stat().st_size > 0

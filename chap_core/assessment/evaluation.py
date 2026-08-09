@@ -26,6 +26,7 @@ from chap_core.assessment.flat_representations import (
     FlatObserved,
     convert_backtest_observations_to_flat_observations,
     convert_backtest_to_flat_forecasts,
+    max_horizon_distance,
 )
 from chap_core.data import DataSet as _DataSet
 from chap_core.database.dataset_tables import DataSet, Observation, ObservationBase
@@ -239,6 +240,8 @@ class EvaluationBase(ABC):
         last_train_period: TimePeriod,
         configured_model: ConfiguredModelDB,
         info: "BacktestCreate",
+        historical_observations: list[Observation] | None = None,
+        historical_context_periods: int = 0,
     ) -> "EvaluationBase": ...
 
 
@@ -332,6 +335,7 @@ class Evaluation(EvaluationBase):
 
         backtest.org_units = list(org_units)
         backtest.split_periods = list(split_points)
+        backtest.max_horizon_distance = max_horizon_distance(backtest.forecasts)
 
         # Deduplicate observations by (period, org_unit) - keep first occurrence
         seen = set()
@@ -398,6 +402,7 @@ class Evaluation(EvaluationBase):
             prediction_length=backtest_params.n_periods,
             n_test_sets=backtest_params.n_splits,
             stride=backtest_params.stride,
+            n_retrain=backtest_params.n_retrain,
         )
 
         # Prepare metadata
@@ -413,13 +418,13 @@ class Evaluation(EvaluationBase):
         )
 
         # Calculate number of periods based on dataset period type
-        historical_context_periods = cls._calculate_periods_from_years(
+        historical_context_periods = cls.calculate_periods_from_years(
             dataset=dataset,
             years=historical_context_years,
         )
 
         # Extract historical observations from the dataset for plotting context
-        historical_observations = cls._extract_historical_observations(
+        historical_observations = cls.extract_historical_observations(
             dataset=dataset,
             up_to_period=last_train_period,
             n_periods=historical_context_periods,
@@ -436,7 +441,7 @@ class Evaluation(EvaluationBase):
         )
 
     @classmethod
-    def _calculate_periods_from_years(cls, dataset: _DataSet, years: int) -> int:
+    def calculate_periods_from_years(cls, dataset: _DataSet, years: int) -> int:
         """
         Calculate number of periods from years based on dataset period type.
 
@@ -473,7 +478,7 @@ class Evaluation(EvaluationBase):
         return years * periods_per_year
 
     @classmethod
-    def _extract_historical_observations(
+    def extract_historical_observations(
         cls,
         dataset: _DataSet,
         up_to_period: TimePeriod,
@@ -671,6 +676,8 @@ class Evaluation(EvaluationBase):
                 values=values,
             )
             backtest.forecasts.append(forecast)
+
+        backtest.max_horizon_distance = max_horizon_distance(backtest.forecasts)
 
         # Create observations from flat data
         observations_df = pd.DataFrame(cast("pd.DataFrame", flat_data.observations))

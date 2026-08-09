@@ -3,13 +3,22 @@ name: Create and publish chap Docker image
 on:
   push:
     branches: ["dev", "master"]
-    tags: ["1.*"]
+    tags: ["v1.*", "v2.*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (tag/branch/sha) to build"
+        required: true
+      tag:
+        description: "Docker image tag to publish"
+        required: true
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
   build-and-push:
+    if: github.repository == 'dhis2-chap/chap-core'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -29,13 +38,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -44,7 +55,9 @@ jobs:
       - name: Determine Docker image tag
         id: tag
         run: |
-          if [[ "$GITHUB_REF" == "refs/heads/dev" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [[ "$GITHUB_REF" == "refs/heads/dev" ]]; then
             TAG="dev"
           elif [[ "$GITHUB_REF" == "refs/heads/master" ]]; then
             TAG="latest"
@@ -60,7 +73,7 @@ jobs:
 
       - name: Build and push Docker image (amd64)
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -73,7 +86,7 @@ jobs:
             GIT_REVISION=${{ github.sha }}
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ matrix.image_name }}
           subject-digest: ${{ steps.push.outputs.digest }}
