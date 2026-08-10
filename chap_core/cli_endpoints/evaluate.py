@@ -224,9 +224,10 @@ def _run_eval(
     )
 
     with template:
-        configuration = get_configuration(model_configuration_yaml)
+        configuration = None 
         estimator: ExternalModel | HpoModel | ExtendedPredictor
         if estimator_options.mode == EstimatorMode.NORMAL:
+            configuration = get_configuration(model_configuration_yaml)
             estimator = get_estimator(template, configuration)
         elif estimator_options.mode == EstimatorMode.HPO:
             estimator = get_hpo_estimator(

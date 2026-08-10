@@ -21,10 +21,10 @@ class HpoModel(HpoModelInterface):
         self,
         objective: Objective,
         model_configuration: dict[str, list],
-        searcher: Searcher = RandomSearcher(10),
+        searcher: Searcher | None = None,
         direction: Direction = "minimize",
     ):
-        self._searcher = searcher
+        self._searcher = searcher if searcher is not None else RandomSearcher(10)
         self._objective = objective
         self._direction = direction
         self.base_configs = model_configuration
