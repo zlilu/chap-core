@@ -18,7 +18,7 @@ class Objective:
         self,
         model_template: ModelTemplate,
         backtest_params: BacktestParams | None = None,
-        metric: str = "rmse",
+        metric: str | None = None,
         historical_context_years: int = 6,
         eval_output_dir: Path | None = None,
     ):

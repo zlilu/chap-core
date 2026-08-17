@@ -36,6 +36,9 @@ from chap_core.rest_api.v1.routers.analytics import MakePredictionRequest
 from chap_core.rest_api.v1.routers.crud import DatasetCreate, ModelConfigurationCreate, ModelTemplateRead
 from chap_core.rest_api.hpo_override import HpoOverride
 from chap_core.hpo.hpoModel import HpoModel
+from chap_core.rest_api.data_models import BacktestCreate
+from chap_core.rest_api.db_worker_functions import run_backtest
+from chap_core.hpo.searcher import GridSearcher
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1237,6 +1240,320 @@ def test_backtest_with_data_hpo_flow(
         assert calls["hpo_train"] == 1
         assert calls["returned_estimator"] is not None
         assert calls["trained_estimator"] is calls["returned_estimator"]
+
+
+@pytest.mark.slow
+def test_run_backtest_minimal_template_example_hpo(
+    clean_engine, weekly_full_data, monkeypatch,
+):
+    hpo_model_name = "min_template_py_ex:hpo"
+    calls = {
+        "get_hpo_configured_model_and_estimator": 0,
+        "model_id": None,
+        "estimator": None,
+    }
+    original_get_hpo = HpoOverride.get_hpo_configured_model_and_estimator
+    def spy_get_hpo_configured_model_and_estimator(cls, model_id, session):
+        configured_model, estimator = original_get_hpo(
+            model_id=model_id,
+            session=session,
+        )
+        calls["get_hpo_configured_model_and_estimator"] += 1
+        calls["model_id"] = model_id 
+        calls["estimator"] = estimator 
+        assert model_id == hpo_model_name 
+        assert isinstance(estimator, HpoModel)
+        # Make the HPO search deterministic and avoid RandomSearcher(10)
+        # repeatedly evaluating the same two alpha values. 
+        # estimator._searcher = GridSearcher() 
+        return configured_model, estimator 
+    def _geojson_for_dataset(dataset):
+        features = []
+        for i, location in enumerate(dataset._data_dict):
+            x = float(i)
+            features.append(
+                {
+                    "type": "Feature",
+                    "id": location,
+                    "properties": {
+                        "district": location,
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [x, 0.0],
+                                [x + 0.5, 0.0],
+                                [x + 0.5, 0.5],
+                                [x, 0.5],
+                                [x, 0.0],
+                            ]
+                        ],
+                    },
+                }
+            )
+        return json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": features,
+            }
+        )
+    monkeypatch.setattr(
+        HpoOverride,
+        "get_hpo_configured_model_and_estimator",
+        classmethod(spy_get_hpo_configured_model_and_estimator),
+    )
+    with SessionWrapper(clean_engine) as session:
+        geojson = _geojson_for_dataset(weekly_full_data)
+        dataset_id = DataSetManager(session.session).save_dataset(
+            DataSetCreateInfo(
+                name="minimal_template_hpo_backtest",
+                type="evaluation",
+            ),
+            weekly_full_data,
+            geojson,
+        )
+        configured_models = session.get_configured_models() 
+        hpo_model = next(
+            (
+                model
+                for model in configured_models 
+                if model.name == hpo_model_name
+            ),
+            None,
+        )
+        assert hpo_model is not None, (
+            f"{hpo_model_name!r} was not returned by "
+            "SessionWrapper.get_configured_models()"
+        )
+        assert HpoOverride.is_hpo_model_name(hpo_model.name)
+        info = BacktestCreate(
+            name="minimal-template-hpo-test",
+            dataset_id=dataset_id,
+            model_id=hpo_model.name,
+        )
+        backtest_id = run_backtest(
+            info=info,
+            n_periods=2,
+            n_splits=2,
+            stride=1,
+            session=session,
+        )
+        assert backtest_id is not None 
+        backtest = session.session.get(Backtest, backtest_id)
+        assert backtest is not None 
+        # Prove run_backtest selected the Hpo branch 
+        assert calls["get_hpo_configured_model_and_estimator"] == 1 
+        assert calls["model_id"] == hpo_model_name 
+        assert isinstance(calls["estimator"], HpoModel)
+        # The user-facing HPO model name should remain on the backtest,
+        # while model_db_id points to the underlying configured model.
+        assert backtest.model_id == hpo_model_name 
+        assert backtest.model_db_id is not None 
+
+
+# @pytest.mark.slow 
+# def test_create_backtest_with_data_minimal_template_example_hpo(
+#     celery_session_worker,
+#     dependency_overrides,
+#     create_backtest_with_data_request,
+#     monkeypatch,
+# ):
+#     hpo_model_name = "min_template_py_ex:hpo"
+
+#     calls = {
+#         "get_hpo_configured_model_and_estimator": 0,
+#         "model_id": None,
+#         "estimator": None,
+#         "hpo_train": 0,
+#     }
+
+#     original_get_hpo = HpoOverride.get_hpo_configured_model_and_estimator
+#     original_hpo_train = HpoModel.train 
+
+#     def spy_get_hpo_configured_model_and_estimator(cls, model_id, session):
+#         configured_model, estimator = original_get_hpo(
+#             model_id=model_id,
+#             session=session,
+#         )
+
+#         calls["get_hpo_configured_model_and_estimator"] += 1
+#         calls["model_id"] = model_id 
+#         calls["estimator"] = estimator 
+
+#         assert model_id == hpo_model_name 
+#         assert isinstance(estimator, HpoModel)
+
+#         return configured_model, estimator 
+
+#     def spy_hpo_train(self, dataset):
+#         calls["hpo_train"] += 1 
+#         return original_hpo_train(self, dataset)
+    
+#     monkeypatch.setattr(
+#         HpoOverride,
+#         "get_hpo_configured_model_and_estimator",
+#         classmethod(spy_get_hpo_configured_model_and_estimator),
+#     )
+
+#     monkeypatch.setattr(
+#         HpoModel,
+#         "train",
+#         spy_hpo_train,
+#     )
+
+#     # create_backtest_with_data should receive a model returned from the 
+#     # configured-model list, just like the real client workflow. 
+#     models_response = client.get("/v1/crud/configured-models")
+
+#     assert models_response.status_code == 200, models_response.json() 
+
+#     configured_models = [
+#         ModelSpecRead.model_validate(model)
+#         for model in models_response.json()
+#     ]
+
+#     hpo_model = next(
+#         (
+#             model 
+#             for model in configured_models 
+#             if model.name == hpo_model_name 
+#         ),
+#         None,
+#     )
+
+#     assert hpo_model is not None, (
+#         f"{hpo_model_name!r} was not returned by "
+#         "/v1/crud/configured-models"
+#     )
+
+#     assert HpoOverride.is_hpo_model_name(hpo_model.name)
+
+#     # start with the same valid inline-data request used by the other 
+#     # create_backtest_with_data integration tests, but select our exact 
+#     # Hpo Model.
+#     request_payload = create_backtest_with_data_request.model_dump()
+#     request_payload["model_id"] = hpo_model.name 
+
+#     response = client.post(
+#         "/v1/analytics/create-backtest-with-data",
+#         json=request_payload,
+#     )
+
+#     assert response.status_code == 200, response.json()
+
+#     content = response.json()
+
+#     # a real run should queue a worker job
+#     assert content["id"] is not NOne 
+#     assert content["importedCount"] > 0 
+#     assert content["rejected"] == []
+
+#     job_id = content["id"]
+
+#     # wait for wf.run_backtest_from_dataset -> run_backtest to complete 
+#     backtest_id = await_result_id(job_id, timeout=180)
+
+#     assert backtest_id is not None 
+
+#     response = client.get(f"/v1/crud/backtests/{backtest_id}")
+
+#     assert response.status_code == 200, response.json()
+
+#     backtest = BacktestFull.model_validate(response.json())
+
+#     # prove that the queued backtest eventually entered the hpo run_backtest branch
+#     assert calls["get_hpo_configured_model_and_estimator"] == 1 
+#     assert calls["model_id"] == hpo_model_name 
+#     assert isinstance(calls["estimator"], HpoModel)
+
+#     # prove that the hpo estimator was actually trained
+#     assert calls["hpo_train"] == 1 
+
+#     assert backtest.model_id == hpo_model_name 
+
+
+def test_create_backtest_with_data_minimal_template_example_hpo(
+    dependency_overrides,
+    create_backtest_with_data_request,
+    monkeypatch,
+):
+    hpo_model_name = "min_template_py_ex:hpo"
+    captured = {
+        "queue_db": 0,
+        "func": None,
+        "kwargs": None,
+    }
+    class FakeJob:
+        id = "test-hpo-job-id"
+    class CapturingWorker:
+        def queue_db(self, func, **kwargs):
+            captured["queue_db"] += 1
+            captured["func"] = func
+            captured["kwargs"] = kwargs
+            return FakeJob()
+    # Important: patch worker where create_backtest_with_data looks it up.
+    from chap_core.rest_api.v1.routers import analytics
+    monkeypatch.setattr(
+        analytics,
+        "worker",
+        CapturingWorker(),
+    )
+    # Use the same model-discovery flow as the real API/client.
+    models_response = client.get("/v1/crud/configured-models")
+    assert models_response.status_code == 200, models_response.json()
+    configured_models = [
+        ModelSpecRead.model_validate(model)
+        for model in models_response.json()
+    ]
+    hpo_model = next(
+        (
+            model
+            for model in configured_models
+            if model.name == hpo_model_name
+        ),
+        None,
+    )
+    assert hpo_model is not None, (
+        f"{hpo_model_name!r} was not returned by "
+        "/v1/crud/configured-models"
+    )
+    assert HpoOverride.is_hpo_model_name(hpo_model.name)
+    # Take the existing valid inline-data request and replace its model
+    # with the minimal-template HPO model.
+    request_payload = create_backtest_with_data_request.model_dump(
+        mode="json"
+    )
+    request_payload["model_id"] = hpo_model.name
+    response = client.post(
+        "/v1/analytics/create-backtest-with-data",
+        json=request_payload,
+    )
+    assert response.status_code == 200, response.json()
+    content = response.json()
+    # create_backtest_with_data should report the fake queued job.
+    assert content["id"] == "test-hpo-job-id"
+    assert content["importedCount"] > 0
+    assert content["rejected"] == []
+    # Prove that the route queued exactly one backtest workflow.
+    assert captured["queue_db"] == 1
+    assert captured["func"] is analytics.wf.run_backtest_from_dataset
+    queued_kwargs = captured["kwargs"]
+    assert queued_kwargs is not None
+    # the synthetic HPO name must survive the endpoint unchanged.
+    assert queued_kwargs["model_id"] == hpo_model_name
+    # Verify the endpoint creates an evaluation dataset for the worker.
+    assert queued_kwargs["dataset_info"]["type"] == "evaluation"
+    # Verify the backtest parameters were forwarded.
+    assert queued_kwargs["backtest_name"] == request_payload["name"]
+    backtest_params = queued_kwargs["backtest_params"]
+    assert backtest_params["n_periods"] == request_payload["n_periods"]
+    assert backtest_params["n_splits"] == request_payload["n_splits"]
+    assert backtest_params["stride"] == request_payload["stride"]
+    # The validated inline dataset should actually have been passed
+    # to the worker.
+    assert queued_kwargs["provided_data_model_dump"]
+    assert queued_kwargs["feature_names"]
 
 
 @pytest.fixture()

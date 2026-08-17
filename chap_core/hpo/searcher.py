@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 _TRIAL_ID_KEY = "_trial_id"  # reserved key we inject into params
-DEFAULT_SEARCH_TRIALS = 3
+DEFAULT_SEARCH_TRIALS = 20
 
 
 class Searcher:
