@@ -11,6 +11,7 @@ from chap_core.spatio_temporal_data.temporal_dataclass import DataSet
 from .meta_learner import MetaLearner
 from .objective import Objective
 from .searcher import RandomSearcher, Searcher, TPESearcher
+from .trial_timeout import HpoTrialCleanupError, hpo_trial_timeout
 from .types import HpoStopReason, HyperparameterOptimization, Trial
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class HyperparameterOptimizer(MetaLearner):
         model_configuration: ModelConfiguration | None,
         search_space: dict[str, Any],
         max_trials: int | None,
+        trial_timeout_seconds: float | None,
         seed: int | None,
     ):
         self._objective = objective
@@ -46,6 +48,7 @@ class HyperparameterOptimizer(MetaLearner):
                 f"max_trials must be specified for non-exhaustive searchers such as {type(searcher).__name__}"
             )
         self._max_trials = max_trials
+        self._trial_timeout_seconds = trial_timeout_seconds
         self._seed = seed
 
     def meta_learn(self, dataset: DataSet) -> HyperparameterOptimization:
@@ -74,12 +77,15 @@ class HyperparameterOptimizer(MetaLearner):
             trial_start = perf_counter()
             score: float | None = None
             failure: str | None = None
-            try:  # does trial failure first get caught here, does everyone earlier only raise it
-                score = float(
-                    self._objective(objective_config, dataset)
-                )  # is constant floating needed, missing two places if needed
+            try:
+                with hpo_trial_timeout(self._trial_timeout_seconds):
+                    score = float(self._objective(objective_config, dataset))
                 if not math.isfinite(score):
                     raise ValueError(f"Objective returned non-finite score: {score}")
+            except HpoTrialCleanupError:
+                # Cleanup failure is not trial failure. The previous model process
+                # may still exist, so starting another trial would be unsafe.
+                raise
             except Exception as exc:
                 score = None
                 failure = f"{type(exc).__name__}: {exc}"
@@ -148,6 +154,7 @@ class HyperparameterOptimizer(MetaLearner):
             metric=self._objective.metric,
             search_space=deepcopy(self._search_space),
             max_trials=self._max_trials,
+            trial_timeout_seconds=self._trial_timeout_seconds,
             seed=self._seed,
             model_configuration=best_configuration,  # check needed
             best_params=best_params,

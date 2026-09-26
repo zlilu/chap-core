@@ -1,11 +1,22 @@
 import logging
+import os
+import signal
 import subprocess
 from pathlib import Path
+from time import monotonic, sleep
 
 from chap_core.exceptions import CommandLineException, ModelConfigurationException
+from chap_core.hpo.trial_timeout import (
+    HpoTrialCleanupError,
+    HpoTrialTimeoutError,
+    current_trial_timeout_seconds,
+    subprocess_trial_deadline,
+)
 from chap_core.runners.runner import Runner, TrainPredictRunner
 
 logger = logging.getLogger(__name__)
+
+_TERMINATION_SECONDS = 2.0
 
 
 class CommandLineRunner(Runner):
@@ -20,8 +31,83 @@ class CommandLineRunner(Runner):
         pass
 
 
+def _communicate_finished(process: subprocess.Popen[bytes], timeout: float) -> bool:
+    """
+    Verify direct Popen child has finished and its captured pipes reached EOF.
+    """
+    try:
+        process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _process_group_exists(pgid: int) -> bool:
+    """
+    Verify that every process in the process group is gone.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False 
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    """
+    Terminate a times HPO command and verify process-group cleanup. 
+    """
+    pgid = process.pid
+
+    try: 
+        # First ask the whole process group to terminate normally.
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            # The group may have exited before signaling
+            pass
+        group_exists = _process_group_exists(pgid)
+        if _communicate_finished(process, timeout=_TERMINATION_SECONDS) and not group_exists:
+            return 
+        # If the group has disappeared but communication is still incomplete, 
+        # something may have escaped the process group.
+        if not group_exists:
+            raise HpoTrialCleanupError(
+                f"Process group {pgid} disappeared, but the command did not finish"
+            )
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        # Check that the direct child finished and pipes closed 
+        if not _communicate_finished(process, timeout=_TERMINATION_SECONDS):
+            raise HpoTrialCleanupError(
+                f"Process group {pgid} did not finish after SIGKILL"
+            )
+        # Allow a bounded period for the group to disappear
+        deadline = monotonic() + _TERMINATION_SECONDS 
+        while _process_group_exists(pgid):
+            if monotonic() >= deadline:
+                raise HpoTrialCleanupError(
+                    f"Process group {pgid} still exists after SIGKILL"
+                )
+            sleep(0.05)
+    # Preserves deliberately raised cleanup errors with their messages.
+    except HpoTrialCleanupError:
+        raise 
+    except Exception as exc:
+        # outer hpo meta_learn excepts Exception as failed trial, convert it to HpoTrialCleanupError should abort HPO
+        raise HpoTrialCleanupError(
+            f"Failed to clean up HPO trial process group {pgid}"
+        ) from exc
+
+
 def run_command(command: str, working_directory=Path("."), env: dict | None = None):
     """Runs a unix command using subprocess.
+
+    If called inside a timed HPO objective, it respects an active HPO trial deadline.
 
     Parameters
     ----------
@@ -33,10 +119,47 @@ def run_command(command: str, working_directory=Path("."), env: dict | None = No
         Environment variables to use. If None, uses the current environment.
     """
     logging.debug(f"Running command: {command}")
-    process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=working_directory, shell=True, env=env
-    )
-    stdout, stderr = process.communicate()
+
+    process: subprocess.Popen[bytes] | None = None
+    timeout_active = False
+    communicated = False
+
+    try:
+        with subprocess_trial_deadline() as deadline:
+            timeout_active = deadline is not None
+
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=working_directory,
+                shell=True,
+                env=env,
+                # For timed HPO trials, create an independent process group containing 
+                # the shell and its descendants (uv, Python/R model process, etc.).
+                start_new_session=timeout_active,
+            )
+
+            remaining: float | None = None
+            if deadline is not None:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    timeout_seconds = current_trial_timeout_seconds()
+                    raise HpoTrialTimeoutError(f"HPO trial exceeded timeout of {timeout_seconds:g} seconds while starting command: {command}")
+            try:
+                stdout, stderr = process.communicate(timeout=remaining)
+            except subprocess.TimeoutExpired as exc:
+                timeout_seconds = current_trial_timeout_seconds()
+                raise HpoTrialTimeoutError(
+                    f"HPO trial exceeded timeout of {timeout_seconds:g} seconds while running command: {command}"
+                ) from exc
+            communicated = True
+    except BaseException:
+        # Clean up on Ctrl-C or another unexpected exception while a timed trial has started but communicate did not finish normally.
+        if process is not None and timeout_active and not communicated:
+            _terminate_process_group(process)
+        raise
+
     # Model output is not guaranteed to be valid UTF-8 (locale-dependent R
     # warnings, for instance); a failed model must still produce a readable
     # error message rather than a UnicodeDecodeError.

@@ -134,6 +134,7 @@ def _run_eval(
             "Optionally --estimator-options.metric=<metric> for hpo. "
             "Optionally --estimator-options.searcher=<searcher> for hpo. "
             "Optionally --estimator-options.max-trials=<max_trials> for hpo. "
+            "Optionally --estimator-options.trial-timeout-seconds=<seconds> for hpo. "
             "Optionally --estimator-options.seed=<seed> for hpo."
         ),
     ] = None,
@@ -169,8 +170,10 @@ def _run_eval(
         # Evaluate with hyperparameter optimization
         chap eval --model-name https://github.com/chap-models/minimal_template_example \\
             --dataset-csv ./example_data/vietnam_monthly.csv --output-file ./chap_core/hpo/eval.nc \\
-            --estimator-options.mode hpo --estimator-options.search-space ./chap_core/hpo/config3.yaml \\
-            --estimator-options.metric rmse --estimator-options.searcher tpe
+            --estimator-options.mode hpo --estimator-options.search-space ./chap_core/hpo/search_space_ex.yaml \\
+            --estimator-options.metric rmse --estimator-options.searcher tpe \\
+            --estimator-options.max-trials 50 --estimator-options.trial-timeout-seconds 900 \\
+            --estimator-options.seed 17
     """
     from chap_core.assessment.evaluation import Evaluation
     from chap_core.database.model_templates_and_config_tables import ConfiguredModelDB, ModelTemplateDB
@@ -336,6 +339,19 @@ def _run_eval(
             chart = create_plot_from_evaluation("evaluation_plot", evaluation)
             chart.save(str(plot_path))
             logger.info(f"Plot saved to {plot_path}")
+
+        import json
+
+        import xarray as xr
+
+        ds = xr.open_dataset(output_file)
+        print("--------------------HERE COMES CONTENT FROM .nc:")
+        print(ds)
+        print("Model metadata:")
+        print(json.dumps(json.loads(ds.attrs["model_info"]), indent=2))
+        if ds.attrs.get("hpo"):
+            print("HPO metadata:")
+            print(json.dumps(json.loads(ds.attrs["hpo"]), indent=2))
 
         hpo_data = evaluation.get_hpo()
         if hpo_data is not None:

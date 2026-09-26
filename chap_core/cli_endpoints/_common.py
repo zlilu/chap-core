@@ -343,6 +343,8 @@ def get_hpo_estimator(
     from chap_core.hpo.search_space import DEFAULT_HPO_TRIALS, search_space_from_config
     from chap_core.hpo.searcher import GridSearcher, RandomSearcher, Searcher, TPESearcher
 
+    ensure_hpo_trial_timeout_backend_supported(template, options.trial_timeout_seconds)
+
     if options.search_space is not None:
         logger.info(f"Loading hpo search space from {options.search_space}")
         with open(options.search_space, encoding="utf-8") as f:
@@ -381,5 +383,34 @@ def get_hpo_estimator(
         model_configuration=configuration,
         search_space=search_space,
         max_trials=options.max_trials if options.max_trials is not None else default_max_trials,
+        trial_timeout_seconds=options.trial_timeout_seconds,
         seed=options.seed,
     )
+
+
+def ensure_hpo_trial_timeout_backend_supported(
+    template: ModelTemplate,
+    trial_timeout_seconds: float | None,
+) -> None:
+    from chap_core.hpo.trial_timeout import ensure_trial_timeout_runtime_supported
+
+    if trial_timeout_seconds is None:
+        return
+
+    # checks Python/OS runtime
+    ensure_trial_timeout_runtime_supported()
+
+    # checks model execution backend
+    config = template.model_template_config
+    # --ignore-environment forces MLProject entry points through local command-line runner.
+    if template.ignore_environment:
+        return
+    # REST/ChapKit execution is remote and not owned by the local command-line runner.
+    if config.rest_api_url is not None:
+        raise ValueError("HPO trial timeout is not currently supported for REST/ChapKit models.")
+    # Docker containers are owned by Docker not local process group and need separate cancellation logic.
+    if config.docker_env is not None:
+        raise ValueError("HPO trial timeout is not currently supported for Docker models.")
+    # MLflow currently bypasses the common local command execution path.
+    if config.python_env is not None:
+        raise ValueError("HPO trial timeout is not currently supported for MLflow models.")

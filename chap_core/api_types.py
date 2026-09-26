@@ -240,6 +240,15 @@ class EstimatorOptions(BaseModel):
         gt=0,
         description="Maximum HPO trials. If omitted, grid search is exhaustive while random/TPE use the default HPO trial count.",
     )
+    trial_timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Maximum wall-clock time in seconds for one HPO trial/objective evaluation. "
+            "A timed-out trial is marked as failed and optimization continues. "
+            "If omitted, trials have no timeout. Currently supported for local CLI runners only."
+        ),
+    )
     seed: int | None = Field(
         default=None,
         description="Random seed used by stochastic search strategies.",

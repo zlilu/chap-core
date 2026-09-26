@@ -48,6 +48,7 @@ class HyperparameterOptimization:
     metric: str
     search_space: dict[str, Any]
     max_trials: int | None
+    trial_timeout_seconds: float | None
     seed: int | None
 
     # Results
@@ -73,6 +74,7 @@ class HyperparameterOptimization:
             direction=get_optimization_direction(self.metric).value,
             search_space=serialize_search_space(self.search_space),
             max_trials=self.max_trials,
+            trial_timeout_seconds=self.trial_timeout_seconds,
             seed=self.seed,
             model_configuration=self.model_configuration.model_dump(mode="json"),
             best_params=self.best_params,
@@ -129,6 +131,7 @@ class FlatHyperparameterOptimization:
     direction: str
     search_space: dict[str, Any]
     max_trials: int | None
+    trial_timeout_seconds: float | None
     seed: int | None
     model_configuration: dict[str, Any]
     best_params: dict[str, Any]

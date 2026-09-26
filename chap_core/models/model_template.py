@@ -83,6 +83,10 @@ class ModelTemplate:
     def model_template_config(self):
         return self._model_template_config
 
+    @property
+    def ignore_environment(self):
+        return self._ignore_env
+
     def get_train_predict_runner(self) -> TrainPredictRunner:
         raise NotImplementedError
 
