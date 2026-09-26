@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -49,7 +50,7 @@ def _process_group_exists(pgid: int) -> bool:
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
-        return False 
+        return False
     except PermissionError:
         return True
     return True
@@ -57,51 +58,38 @@ def _process_group_exists(pgid: int) -> bool:
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     """
-    Terminate a times HPO command and verify process-group cleanup. 
+    Terminate a times HPO command and verify process-group cleanup.
     """
     pgid = process.pid
 
-    try: 
+    try:
         # First ask the whole process group to terminate normally.
-        try:
+        with suppress(ProcessLookupError):  # the group may have exited before signaling
             os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            # The group may have exited before signaling
-            pass
         group_exists = _process_group_exists(pgid)
         if _communicate_finished(process, timeout=_TERMINATION_SECONDS) and not group_exists:
-            return 
-        # If the group has disappeared but communication is still incomplete, 
+            return
+        # If the group has disappeared but communication is still incomplete,
         # something may have escaped the process group.
         if not group_exists:
-            raise HpoTrialCleanupError(
-                f"Process group {pgid} disappeared, but the command did not finish"
-            )
-        try:
+            raise HpoTrialCleanupError(f"Process group {pgid} disappeared, but the command did not finish")
+        with suppress(ProcessLookupError):
             os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        # Check that the direct child finished and pipes closed 
+        # Check that the direct child finished and pipes closed
         if not _communicate_finished(process, timeout=_TERMINATION_SECONDS):
-            raise HpoTrialCleanupError(
-                f"Process group {pgid} did not finish after SIGKILL"
-            )
+            raise HpoTrialCleanupError(f"Process group {pgid} did not finish after SIGKILL")
         # Allow a bounded period for the group to disappear
-        deadline = monotonic() + _TERMINATION_SECONDS 
+        deadline = monotonic() + _TERMINATION_SECONDS
         while _process_group_exists(pgid):
             if monotonic() >= deadline:
-                raise HpoTrialCleanupError(
-                    f"Process group {pgid} still exists after SIGKILL"
-                )
+                raise HpoTrialCleanupError(f"Process group {pgid} still exists after SIGKILL")
             sleep(0.05)
     # Preserves deliberately raised cleanup errors with their messages.
     except HpoTrialCleanupError:
-        raise 
+        raise
     except Exception as exc:
         # outer hpo meta_learn excepts Exception as failed trial, convert it to HpoTrialCleanupError should abort HPO
-        raise HpoTrialCleanupError(
-            f"Failed to clean up HPO trial process group {pgid}"
-        ) from exc
+        raise HpoTrialCleanupError(f"Failed to clean up HPO trial process group {pgid}") from exc
 
 
 def run_command(command: str, working_directory=Path("."), env: dict | None = None):
@@ -135,7 +123,7 @@ def run_command(command: str, working_directory=Path("."), env: dict | None = No
                 cwd=working_directory,
                 shell=True,
                 env=env,
-                # For timed HPO trials, create an independent process group containing 
+                # For timed HPO trials, create an independent process group containing
                 # the shell and its descendants (uv, Python/R model process, etc.).
                 start_new_session=timeout_active,
             )
@@ -145,7 +133,9 @@ def run_command(command: str, working_directory=Path("."), env: dict | None = No
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     timeout_seconds = current_trial_timeout_seconds()
-                    raise HpoTrialTimeoutError(f"HPO trial exceeded timeout of {timeout_seconds:g} seconds while starting command: {command}")
+                    raise HpoTrialTimeoutError(
+                        f"HPO trial exceeded timeout of {timeout_seconds:g} seconds while starting command: {command}"
+                    )
             try:
                 stdout, stderr = process.communicate(timeout=remaining)
             except subprocess.TimeoutExpired as exc:
